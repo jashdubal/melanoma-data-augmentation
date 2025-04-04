@@ -27,4 +27,5 @@ python download_random.py
 This will create a `random` directory in the `ISIC-images-split/train`, `ISIC-images-split/test`, and `ISIC-images-split/validation` directories.
 
 ## Part 3: Augment clear skin images
-Available at: https://gallery.isic-archive.com/. Filter Lesion Images by: Benign - Other. Download all images.
+Idea 1: Use thispersondoesnotexist.com and generate 3 images (left cheek, right cheek, chin)
+Idea 2: Use makeup dataset: https://www.kaggle.com/datasets/tobyclh/microglam/data
