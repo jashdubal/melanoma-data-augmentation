@@ -6,18 +6,21 @@ from PIL import Image
 from io import BytesIO
 from datasets import load_dataset
 from tqdm import tqdm
+from itertools import islice
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Constants
-NUM_IMAGES = 300
+NUM_IMAGES = 10  # Set to desired number of images
 TRAIN_RATIO = 0.9
 TEST_RATIO = 0.05
 VAL_RATIO = 0.05  # Should sum to 1 with TRAIN_RATIO and TEST_RATIO
 BASE_DIR = "ISIC-images-split"
 RANDOM_CLASS = "random"
+# Add buffer for failed downloads (fetch more samples than needed)
+SAMPLE_BUFFER = 10.0  # Try to fetch 2x the number of samples needed
 
 # Define paths
 TRAIN_DIR = os.path.join(BASE_DIR, "train", RANDOM_CLASS)
@@ -48,38 +51,44 @@ def crop_to_square(image):
     return image.crop((left, top, right, bottom))
 
 def download_and_process_images():
-    """Download, crop, and save random images with the specified split."""
+    """Download, crop, and save random images with the specified split using streaming dataset."""
     
-    # Load a subset of the LAION dataset
-    subset_size = 'train[:0.001%]'  # Adjusted to ensure sufficient samples
-    logger.info(f"Loading dataset with subset size {subset_size}...")
-    dataset = load_dataset('laion/laion400m', split=subset_size)
+    # Load dataset in streaming mode
+    logger.info("Loading LAION dataset in streaming mode...")
+    streaming_dataset = load_dataset('laion/laion400m', split='train', streaming=True)
     
-    # Shuffle the dataset to randomize the order
-    shuffled_dataset = dataset.shuffle(seed=42)
-    
-    # Make sure we have enough samples
-    if len(shuffled_dataset) < NUM_IMAGES:
-        logger.warning(f"Only {len(shuffled_dataset)} images available, which is less than the requested {NUM_IMAGES}.")
-        num_to_download = len(shuffled_dataset)
-    else:
-        num_to_download = NUM_IMAGES
-    
-    # Select the required number of samples
-    sampled_dataset = shuffled_dataset.select(range(num_to_download))
+    # Shuffle the dataset
+    shuffled_dataset = streaming_dataset.shuffle(seed=42, buffer_size=10000)
     
     # Calculate split counts
-    train_count = int(num_to_download * TRAIN_RATIO)
-    test_count = int(num_to_download * TEST_RATIO)
-    val_count = num_to_download - train_count - test_count
+    train_count = int(NUM_IMAGES * TRAIN_RATIO)
+    test_count = int(NUM_IMAGES * TEST_RATIO)
+    val_count = NUM_IMAGES - train_count - test_count
     
-    logger.info(f"Split: {train_count} training, {test_count} testing, {val_count} validation")
+    logger.info(f"Target split: {train_count} training, {test_count} testing, {val_count} validation")
+    
+    # Initialize counters for successful downloads
+    train_success = 0
+    test_success = 0
+    val_success = 0
+    total_success = 0
+    
+    # Fetch more samples than needed to account for failures
+    buffer_size = int(NUM_IMAGES * SAMPLE_BUFFER)
+    samples_iterator = islice(shuffled_dataset, buffer_size)
+    
+    # Progress bar will update as we process images
+    pbar = tqdm(total=NUM_IMAGES, desc="Successfully downloaded images")
     
     # Process images
-    for i, sample in enumerate(tqdm(sampled_dataset, desc="Downloading and processing images")):
+    for i, sample in enumerate(samples_iterator):
+        # If we've already got enough successful downloads, break
+        if total_success >= NUM_IMAGES:
+            break
+            
         try:
             # Extract the image URL
-            image_url = sample['URL']
+            image_url = sample['url']
             
             # Download the image
             response = requests.get(image_url, timeout=10)
@@ -91,25 +100,40 @@ def download_and_process_images():
             image = Image.open(BytesIO(response.content))
             image = crop_to_square(image)
             
-            # Determine which split this image belongs to
-            if i < train_count:
+            # Determine which split this image belongs to based on current counts
+            if train_success < train_count:
                 save_dir = TRAIN_DIR
-            elif i < train_count + test_count:
+                train_success += 1
+            elif test_success < test_count:
                 save_dir = TEST_DIR
+                test_success += 1
             else:
                 save_dir = VAL_DIR
+                val_success += 1
             
             # Generate a filename based on the ISIC naming convention
-            filename = f"RANDOM_{i:06d}.jpg"
+            filename = f"RANDOM_{total_success:06d}.jpg"
             save_path = os.path.join(save_dir, filename)
             
             # Save the image
             image.save(save_path)
             
+            # Increment total successful downloads and update progress bar
+            total_success += 1
+            pbar.update(1)
+            
         except Exception as e:
             logger.error(f"Error processing image {i}: {str(e)}")
     
-    logger.info(f"Successfully downloaded and processed {num_to_download} images")
+    pbar.close()
+    
+    # Report final counts
+    logger.info(f"Successfully downloaded and processed {total_success} images")
+    logger.info(f"Final split: {train_success} training, {test_success} testing, {val_success} validation")
+    
+    # Check if we got enough images
+    if total_success < NUM_IMAGES:
+        logger.warning(f"Could only download {total_success}/{NUM_IMAGES} images. Consider increasing SAMPLE_BUFFER.")
 
 if __name__ == "__main__":
     create_directories()
